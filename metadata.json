@@ -1,0 +1,6 @@
+{
+  "name": "ChatConnect",
+  "description": "Production-ready multi-user messaging app with Google Sign-in, Firebase Auth, Cloud Firestore persistence, individual/group chats, voice/video calls, status stories, and media sharing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

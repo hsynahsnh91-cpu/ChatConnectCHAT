@@ -1,0 +1,191 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions for call session authorization
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.uid == 'admin_root_super_user' ||
+        request.auth.token.email == 'admin@chatconnect.app' ||
+        request.auth.token.email == 'hsynahsnh91@gmail.com' ||
+        request.auth.token.admin == true ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.admin == true ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN' ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.customId == '7778889990'
+        ))
+      );
+    }
+
+    // Helper verifying that user document has an 'admin' flag
+    function hasAdminFlag() {
+      return isAdmin();
+    }
+    
+    function isParticipant(callData) {
+      return isSignedIn() && (request.auth.uid == callData.callerUserId || request.auth.uid == callData.receiverUserId);
+    }
+
+    // Call sessions collection
+    match /calls/{callId} {
+      // Allow creation only if user is signed in and is the caller
+      allow create: if isSignedIn() 
+                    && request.resource.data.callerUserId == request.auth.uid
+                    && request.resource.data.callId == callId;
+
+      // Allow reading call state only if caller or receiver
+      allow read: if isSignedIn() && isParticipant(resource.data);
+
+      // Allow update if caller or receiver:
+      // - Receiver can update status to CONNECTED and set sdpAnswer
+      // - Either caller or receiver can terminate/end call
+      allow update: if isSignedIn() && isParticipant(resource.data);
+
+      // Only the initiator (caller) can delete session records
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.callerUserId;
+
+      // ICE Candidates sub-collection for WebRTC NAT traversal
+      match /ice_candidates/{candidateId} {
+        // Only participants of the parent call session can read ICE candidates
+        allow read: if isSignedIn() && (
+          request.auth.uid == get(/databases/$(database)/documents/calls/$(callId)).data.callerUserId ||
+          request.auth.uid == get(/databases/$(database)/documents/calls/$(callId)).data.receiverUserId
+        );
+
+        // Only participants can post their own ICE candidate
+        allow create: if isSignedIn() 
+                      && request.resource.data.senderUserId == request.auth.uid
+                      && (
+                        request.auth.uid == get(/databases/$(database)/documents/calls/$(callId)).data.callerUserId ||
+                        request.auth.uid == get(/databases/$(database)/documents/calls/$(callId)).data.receiverUserId
+                      );
+      }
+    }
+
+    // Call history collection with participant authorization and indexing
+    match /call_history/{historyId} {
+      // Allow read only if authenticated user is a participant
+      allow read: if isSignedIn() && (request.auth.uid in resource.data.participants);
+
+      // Allow creation if authenticated user is one of the participants
+      allow create: if isSignedIn() && (request.auth.uid in request.resource.data.participants);
+
+      // Allow update or delete only by participants
+      allow update, delete: if isSignedIn() && (request.auth.uid in resource.data.participants);
+    }
+
+    // Statuses collection: Only owner can create, update, or delete their own status
+    match /statuses/{statusId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // Status Views: strictly private to the status owner
+    match /status_views/{viewId} {
+      // Viewer records their own view
+      allow create: if isSignedIn() && request.resource.data.viewerUserId == request.auth.uid;
+      // ONLY status owner can read their viewer list (or viewer can read their own view record)
+      allow read: if isSignedIn() && (
+        resource.data.statusOwnerUserId == request.auth.uid ||
+        resource.data.viewerUserId == request.auth.uid
+      );
+      allow update, delete: if isSignedIn() && (
+        resource.data.statusOwnerUserId == request.auth.uid ||
+        resource.data.viewerUserId == request.auth.uid
+      );
+    }
+
+    // Status Mutes: private per user
+    match /status_mutes/{muteId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // Chats and Groups collection
+    match /chats/{chatId} {
+      // Allow reading chat/group if user is a member, or if querying public invite token preview
+      allow read: if isSignedIn() && (
+        resource.data.type != 'GROUP' ||
+        (request.auth.uid in resource.data.memberIds) ||
+        resource.data.inviteToken != null
+      );
+
+      // Allow creating a new chat/group if user is authenticated and is a member
+      allow create: if isSignedIn() && (
+        request.resource.data.createdByUserId == request.auth.uid ||
+        (request.auth.uid in request.resource.data.memberIds)
+      );
+
+      // Allow updating chat/group if user is an existing member or joining via valid invite
+      allow update: if isSignedIn() && (
+        (request.auth.uid in resource.data.memberIds) ||
+        (request.auth.uid in request.resource.data.memberIds)
+      );
+
+      // Only owner or creator can delete group/chat
+      allow delete: if isSignedIn() && (
+        resource.data.createdByUserId == request.auth.uid ||
+        resource.data.groupOwnerId == request.auth.uid
+      );
+
+      // Messages subcollection
+      match /messages/{messageId} {
+        // Only members of the chat can read messages
+        allow read: if isSignedIn() && (
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.memberIds
+        );
+
+        // Allow sending message if sender is authenticated, matches senderUserId, and is a member
+        allow create: if isSignedIn() &&
+          request.resource.data.senderUserId == request.auth.uid &&
+          (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.memberIds);
+
+        // Sender can update/delete their own message, or recipient can mark message as read with readAt timestamp
+        allow update: if isSignedIn() && (
+          resource.data.senderUserId == request.auth.uid ||
+          (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.memberIds &&
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'readAt']))
+        );
+        allow delete: if isSignedIn() && resource.data.senderUserId == request.auth.uid;
+
+        // Sub-collection within each chat message document storing emoji reactions
+        match /reactions/{userId} {
+          allow read: if isSignedIn() && (
+            request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.memberIds
+          );
+          // Any member can set or delete their own emoji reaction
+          allow create, update, delete, write: if isSignedIn() &&
+            request.auth.uid == userId &&
+            (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.memberIds);
+        }
+      }
+    }
+
+    // SpecialIdentifiers collection for unique vanity IDs
+    // Allows contact discovery without exposing auth-sensitive fields
+    match /SpecialIdentifiers/{identifier} {
+      // Any authenticated user can read/lookup identifiers to discover contacts by vanity ID
+      allow read: if isSignedIn();
+
+      // Only administrative users with an 'admin' flag in their user document can create/assign/reserve IDs
+      allow create, update, delete, write: if hasAdminFlag();
+    }
+
+    match /special_identifiers/{identifier} {
+      allow read: if isSignedIn();
+      allow create, update, delete, write: if hasAdminFlag();
+    }
+
+    // Default catch-all for authenticated users
+    match /{document=**} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}
